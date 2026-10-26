@@ -73,18 +73,21 @@ const GET_SETTINGS_QUERY = `
 // Batch query: fetch multiple products by handles in a single GraphQL call.
 // Uses Shopify's `products` query with an OR-based handle filter.
 // Shopify supports up to 250 products per query.
+// Fetch the RFQ metafields DIRECTLY by namespace/key instead of pulling a
+// slice of all metafields. The previous `metafields(first: 10)` approach
+// silently failed for products with >10 metafields, because `rfq_enabled`
+// could fall outside the first 10 returned (Shopify's order is not
+// guaranteed) — leaving the add-to-cart button visible even when RFQ was
+// enabled. We mirror the Liquid precedence (custom > app/$app).
 const GET_PRODUCTS_BY_HANDLES = `
   query GetProductsByHandles($query: String!) {
     products(first: 250, query: $query) {
       nodes {
         handle
-        metafields(first: 10) {
-          nodes {
-            namespace
-            key
-            value
-          }
-        }
+        customEnabled: metafield(namespace: "custom", key: "rfq_enabled") { value }
+        customHidePrice: metafield(namespace: "custom", key: "rfq_hide_price") { value }
+        appEnabled: metafield(namespace: "$app", key: "rfq_enabled") { value }
+        appHidePrice: metafield(namespace: "$app", key: "rfq_hide_price") { value }
       }
     }
   }
@@ -146,18 +149,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           const nodes = data?.data?.products?.nodes || [];
           
           for (const product of nodes) {
-            const metafields = product.metafields?.nodes || [];
-            let rfqEnabled = false;
-            let hidePrice = false;
-            
-            for (const mf of metafields) {
-              if (mf.key === "rfq_enabled" && mf.value === "true") {
-                rfqEnabled = true;
-              }
-              if (mf.key === "rfq_hide_price" && mf.value === "true") {
-                hidePrice = true;
-              }
-            }
+            // Prefer the `custom` namespace (written by the admin product
+            // block); fall back to the app-reserved namespace to match the
+            // Liquid's precedence.
+            const rfqEnabled =
+              product.customEnabled?.value === "true" ||
+              product.appEnabled?.value === "true";
+            const hidePrice =
+              product.customHidePrice?.value === "true" ||
+              product.appHidePrice?.value === "true";
             
             products[product.handle] = { rfqEnabled, hidePrice };
           }
